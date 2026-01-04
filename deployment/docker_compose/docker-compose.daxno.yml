@@ -67,4 +67,4 @@ services:
 networks:
   default:
     name: onyx_default
-    external: true
+
