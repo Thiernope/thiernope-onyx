@@ -19,6 +19,7 @@ from onyx.db.models import Project__UserFile
 from onyx.db.models import User
 from onyx.db.models import UserFile
 from onyx.db.models import UserProject
+from onyx.db.models import UserGroup
 from onyx.server.documents.connector import upload_files
 from onyx.server.features.projects.projects_file_utils import categorize_uploaded_files
 from onyx.utils.logger import setup_logger
@@ -51,7 +52,7 @@ def create_user_files(
 ) -> CategorizedFilesResult:
 
     # Categorize the files
-    categorized_files = categorize_uploaded_files(files)
+    categorized_files = categorize_uploaded_files(files, user, db_session)
     # NOTE: At the moment, zip metadata is not used for user files.
     # Should revisit to decide whether this should be a feature.
     upload_response = upload_files(categorized_files.acceptable, FileOrigin.USER_FILE)
@@ -163,12 +164,33 @@ def check_project_ownership(
             is not None
         )
 
-    return (
+    if (
         db_session.query(UserProject)
         .filter(UserProject.id == project_id, UserProject.user_id == user_id)
         .first()
         is not None
-    )
+    ):
+        return True
+
+    # Check group-based access (Daxno specific)
+    from onyx.db.models import User__UserGroup
+    group_name = f"Project-{project_id}"
+    
+    # Check if user is in the group with this name
+    is_in_group = (
+        db_session.query(User__UserGroup)
+        .join(UserGroup, User__UserGroup.user_group_id == UserGroup.id)
+        .filter(
+            User__UserGroup.user_id == user_id,
+            UserGroup.name == group_name
+        )
+        .first()
+    ) is not None
+
+    if is_in_group:
+        return True
+
+    return False
 
 
 def get_user_files_from_project(
@@ -222,8 +244,8 @@ def get_project_token_count(
     total_tokens = (
         db_session.query(func.coalesce(func.sum(UserFile.token_count), 0))
         .filter(
-            UserFile.user_id == user_id,
             UserFile.projects.any(id=project_id),
+            UserFile.user_id == user_id
         )
         .scalar()
         or 0

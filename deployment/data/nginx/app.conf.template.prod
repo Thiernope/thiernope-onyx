@@ -22,21 +22,25 @@ map $http_x_forwarded_port $forwarded_port {
     ""      $server_port;
 }
 
-upstream api_server {
-    # fail_timeout=0 means we always retry an upstream even if it failed
-    # to return a good HTTP response
 
-    # for UNIX domain socket setups
-    #server unix:/tmp/gunicorn.sock fail_timeout=0;
+# Use Docker's internal DNS resolver to handle container IP changes dynamically
+resolver 127.0.0.11 valid=30s;
 
-    # for a TCP configuration
-    # TODO: use gunicorn to manage multiple processes
-    server ${ONYX_BACKEND_API_HOST}:8080 fail_timeout=0;
-}
-
-upstream web_server {
-    server ${ONYX_WEB_SERVER_HOST}:3000 fail_timeout=0;
-}
+# upstream api_server {
+#     # fail_timeout=0 means we always retry an upstream even if it failed
+#     # to return a good HTTP response
+# 
+#     # for UNIX domain socket setups
+#     #server unix:/tmp/gunicorn.sock fail_timeout=0;
+# 
+#     # for a TCP configuration
+#     # TODO: use gunicorn to manage multiple processes
+#     # server ${ONYX_BACKEND_API_HOST}:8080 fail_timeout=0;
+# }
+# 
+# upstream web_server {
+#     # server ${ONYX_WEB_SERVER_HOST}:3000 fail_timeout=0;
+# }
 
 # Conditionally include MCP upstream configuration
 include /etc/nginx/conf.d/mcp_upstream.conf.inc;
@@ -53,6 +57,10 @@ server {
 
     # Match both /api/* and /openapi.json in a single rule
     location ~ ^/(api|openapi.json)(/.*)?$ {
+        # Dynamic Resolution
+        # MUST be defined before rewrite ... break; otherwise it gets skipped!
+        set $api_upstream http://${ONYX_BACKEND_API_HOST}:8080;
+
         # Rewrite /api prefixed matched paths
         rewrite ^/api(/.*)$ $1 break;
 
@@ -76,10 +84,14 @@ server {
         # we don't want nginx trying to do something clever with
         # redirects, we set the Host: header above already.
         proxy_redirect off;
-        proxy_pass http://api_server;
+        
+        proxy_pass $api_upstream$uri$is_args$args;
     }
 
     location / {
+        # Dynamic Resolution
+        set $web_upstream http://${ONYX_WEB_SERVER_HOST}:3000;
+
         # misc headers
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -98,7 +110,8 @@ server {
         # we don't want nginx trying to do something clever with
         # redirects, we set the Host: header above already.
         proxy_redirect off;
-        proxy_pass http://web_server;
+        
+        proxy_pass $web_upstream;
     }
 
     location /.well-known/acme-challenge/ {

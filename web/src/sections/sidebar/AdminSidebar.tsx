@@ -160,7 +160,7 @@ const collections = (
         },
       ]
       : []),
-    ...(!isCurator && isSuperAdmin
+    ...(!isCurator
       ? [
         {
           name: "Configuration",

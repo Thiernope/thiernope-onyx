@@ -181,14 +181,38 @@ def test_default_provider(
 
 @admin_router.get("/provider")
 def list_llm_providers(
-    _: User | None = Depends(current_admin_user),
+    user: User | None = Depends(current_admin_user),
     db_session: Session = Depends(get_session),
 ) -> list[LLMProviderView]:
     start_time = datetime.now(timezone.utc)
     logger.debug("Starting to fetch LLM providers")
 
+    # CUSTOM LOGIC: Enforce strict isolation for Shadow Users
+    # Shadow Users have auto-generated emails starting with "api_key__".
+    # We strip their "Admin" privilege for VIEWING providers to enforce Group Isolation.
+    # This ensures they only see their BYOK provider and not the Global one.
+    is_shadow_admin = False
+    if user:
+        if user.email is None:
+            is_shadow_admin = True
+        elif user.email.startswith("api_key__"):
+            is_shadow_admin = True
+    
+    effective_is_admin = False if is_shadow_admin else True
+    
+    user_group_ids = fetch_user_group_ids(db_session, user)
+
     llm_provider_list: list[LLMProviderView] = []
     for llm_provider_model in fetch_existing_llm_providers(db_session):
+        # Filter based on access
+        if not can_user_access_llm_provider(
+            llm_provider_model, 
+            user_group_ids, 
+            persona=None, 
+            is_admin=effective_is_admin
+        ):
+            continue
+
         from_model_start = datetime.now(timezone.utc)
         full_llm_provider = LLMProviderView.from_model(llm_provider_model)
         from_model_end = datetime.now(timezone.utc)
@@ -313,9 +337,16 @@ def delete_llm_provider(
 @admin_router.post("/provider/{provider_id}/default")
 def set_provider_as_default(
     provider_id: int,
-    _: User | None = Depends(current_admin_user),
+    user: User | None = Depends(current_admin_user),
     db_session: Session = Depends(get_session),
 ) -> None:
+    # SAFETY CHECK: Prevent Shadow Admins (BYOK users) from changing global default
+    if user and user.email and user.email.startswith("api_key__"):
+         raise HTTPException(
+            status_code=403,
+            detail="Project Owners cannot change the Global Default Provider. Please contact system admin."
+        )
+
     update_default_provider(provider_id=provider_id, db_session=db_session)
 
 

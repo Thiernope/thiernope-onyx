@@ -64,6 +64,20 @@ export default async function Page(props: PageProps) {
 
     // Add a query parameter to indicate this is a redirect from login
     // This will help prevent redirect loops
+    if (nextUrl) {
+      if (nextUrl.startsWith("/")) {
+        return redirect(nextUrl);
+      }
+      try {
+        const url = new URL(nextUrl);
+        // Only allow redirect to the same domain or relative paths
+        if (url.origin === process.env.NEXT_PUBLIC_WEB_DOMAIN || url.origin === process.env.WEB_DOMAIN || url.origin === "http://localhost:3000") {
+          return redirect(nextUrl);
+        }
+      } catch (e) {
+        // ignore invalid urls
+      }
+    }
     return redirect("/chat?from=login");
   }
 

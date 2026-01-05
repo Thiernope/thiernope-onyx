@@ -20,6 +20,16 @@ from shared_configs.configs import SKIP_USERFILE_THRESHOLD
 from shared_configs.configs import SKIP_USERFILE_THRESHOLD_TENANT_LIST
 from shared_configs.contextvars import get_current_tenant_id
 
+# New imports for user context
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from onyx.db.models import User
+from onyx.db.llm import fetch_existing_llm_providers, can_user_access_llm_provider, fetch_user_group_ids
+from onyx.llm.factory import get_llm
+from onyx.db.models import LLMProvider as LLMProviderModel
+from onyx.server.manage.llm.models import LLMProviderView
+from onyx.llm.interfaces import LLM
+
 
 logger = setup_logger()
 FILE_TOKEN_COUNT_THRESHOLD = 100000
@@ -112,19 +122,103 @@ def estimate_image_tokens_for_upload(
             pass
 
 
-def categorize_uploaded_files(files: list[UploadFile]) -> CategorizedFiles:
+
+def get_user_preferred_llm(user: User | None, db_session: Session) -> tuple[LLM, LLM]:
+    """
+    Selects the best available LLM for the user context.
+    Priority:
+    1. Check all providers accessible to the user.
+    2. Prefer a NON-default provider (Project/Personal) over the Global Default.
+    3. Fallback to Global Default (Standard Provider) if no specific provider found.
+    """
+    try:
+        # 1. Fetch all providers and user groups
+        all_providers = fetch_existing_llm_providers(db_session)
+        user_group_ids = fetch_user_group_ids(db_session, user)
+        
+        accessible_providers = []
+        default_provider_model = None
+        
+        # 2. Filter accessible providers
+        for provider in all_providers:
+            if provider.is_default_provider:
+                default_provider_model = provider
+            
+            if can_user_access_llm_provider(
+                provider, 
+                user_group_ids, 
+                persona=None  # No persona context for file upload
+            ):
+                accessible_providers.append(provider)
+        
+        # 3. Selection Rule: Prefer Non-Default (Personal/Project)
+        selected_provider = None
+        
+        # Look for non-default accessible provider first
+        for p in accessible_providers:
+            if not p.is_default_provider:
+                selected_provider = p
+                break
+        
+        # If no custom provider, use default if accessible (Standard User case)
+        if not selected_provider and default_provider_model in accessible_providers:
+            selected_provider = default_provider_model
+            
+        # 4. Fallback: If still nothing (shouldn't happen for valid users), try global default
+        if not selected_provider:
+            logger.warning(f"No accessible provider found for user {getattr(user, 'id', 'anon')}. Trying global default fallback.")
+            return get_default_llms()
+
+        # Build LLM Objects
+        logger.info(f"Context-Aware Upload: Using Provider '{selected_provider.name}' for user {getattr(user, 'id', 'anon')}")
+        
+        provider_view = LLMProviderView.from_model(selected_provider)
+        # SECURITY: Mask API key in logs immediately if it was ever logged (it wasn't here, but good practice to ensure view usage)
+        if provider_view.api_key:
+             # We need raw key for get_llm, so we don't mask the object itself, but ensure we don't log it.
+             pass
+        model_name = selected_provider.default_model_name
+        
+        if not model_name:
+             raise ValueError(f"Provider {selected_provider.name} has no default model.")
+
+        llm = get_llm(
+            provider=provider_view.provider,
+            model=model_name,
+            deployment_name=provider_view.deployment_name,
+            api_key=provider_view.api_key,
+            api_base=provider_view.api_base,
+            api_version=provider_view.api_version,
+            custom_config=provider_view.custom_config,
+            max_input_tokens=100000 # Use large default for utils
+        )
+        
+        # We only need one LLM for tokenization in this util
+        return llm, llm 
+
+    except Exception as e:
+        logger.error(f"Failed to determination user-preferred LLM: {str(e)[:200]}") # Truncate error to avoid dumping huge payloads
+        return get_default_llms()
+
+
+def categorize_uploaded_files(
+    files: list[UploadFile], 
+    user: User | None = None, 
+    db_session: Session | None = None
+) -> CategorizedFiles:
     """
     Categorize uploaded files based on text extractability and tokenized length.
-
-    - Extracts text using extract_file_text for supported plain/document extensions.
-    - Uses default tokenizer to compute token length.
-    - If token length > 100,000, marked as non_accepted (unless threshold skip is enabled).
-    - If extension unsupported or text cannot be extracted, marked as unsupported.
-    - Otherwise marked as acceptable.
+    Now supports user context to select the correct LLM provider (BYOK vs Standard).
     """
 
     results = CategorizedFiles()
-    llm, _ = get_default_llms()
+    
+    # Resolve LLM using context if available
+    if user and db_session:
+        llm, _ = get_user_preferred_llm(user, db_session)
+    else:
+        # Fallback for legacy calls or missing context
+        llm, _ = get_default_llms()
 
     tokenizer = get_tokenizer(
         model_name=llm.config.model_name, provider_type=llm.config.model_provider

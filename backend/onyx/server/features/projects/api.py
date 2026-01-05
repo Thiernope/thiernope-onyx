@@ -21,9 +21,12 @@ from onyx.db.enums import UserFileStatus
 from onyx.db.models import ChatSession
 from onyx.db.models import Project__UserFile
 from onyx.db.models import User
+from onyx.db.models import User__UserGroup
 from onyx.db.models import UserFile
+from onyx.db.models import UserGroup
 from onyx.db.models import UserProject
 from onyx.db.persona import get_personas_by_ids
+from onyx.db.projects import check_project_ownership
 from onyx.db.projects import get_project_token_count
 from onyx.db.projects import upload_files_to_user_files_with_indexing
 from onyx.server.features.projects.models import CategorizedFilesSnapshot
@@ -52,8 +55,33 @@ def get_projects(
     db_session: Session = Depends(get_session),
 ) -> list[UserProjectSnapshot]:
     user_id = user.id if user is not None else None
+    
+    project_ids_from_groups: list[int] = []
+    if user:
+        # Use regex or safer split to extract ID from "Project-<id>"
+        # Expected format: "Project-123"
+        raw_rows = (
+            db_session.query(UserGroup.name)
+            .join(User__UserGroup, UserGroup.id == User__UserGroup.user_group_id)
+            .filter(
+                User__UserGroup.user_id == user_id,
+                UserGroup.name.like("Project-%")
+            )
+            .all()
+        )
+        
+        for row in raw_rows:
+            # row is a tuple, e.g. ('Project-123',)
+            name = row[0]
+            if name.startswith("Project-") and "-" in name:
+                parts = name.split("-", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    project_ids_from_groups.append(int(parts[1]))
+
     projects = (
-        db_session.query(UserProject).filter(UserProject.user_id == user_id).all()
+        db_session.query(UserProject)
+        .filter(or_(UserProject.user_id == user_id, UserProject.id.in_(project_ids_from_groups)))
+        .all()
     )
     return [UserProjectSnapshot.from_model(project) for project in projects]
 
@@ -123,10 +151,10 @@ def get_project(
     user_id = user.id if user is not None else None
     project = (
         db_session.query(UserProject)
-        .filter(UserProject.id == project_id, UserProject.user_id == user_id)
+        .filter(UserProject.id == project_id)
         .one_or_none()
     )
-    if project is None:
+    if project is None or not check_project_ownership(project_id, user_id, db_session):
         raise HTTPException(status_code=404, detail="Project not found")
     return UserProjectSnapshot.from_model(project)
 
@@ -138,12 +166,14 @@ def get_files_in_project(
     db_session: Session = Depends(get_session),
 ) -> list[UserFileSnapshot]:
     user_id = user.id if user is not None else None
+    if not check_project_ownership(project_id, user_id, db_session):
+        raise HTTPException(status_code=404, detail="Project not found")
+
     user_files = (
         db_session.query(UserFile)
         .join(Project__UserFile, UserFile.id == Project__UserFile.user_file_id)
         .filter(
             Project__UserFile.project_id == project_id,
-            UserFile.user_id == user_id,
             UserFile.status != UserFileStatus.FAILED,
         )
         .order_by(Project__UserFile.created_at.desc())
@@ -166,10 +196,10 @@ def unlink_user_file_from_project(
     user_id = user.id if user is not None else None
     project = (
         db_session.query(UserProject)
-        .filter(UserProject.id == project_id, UserProject.user_id == user_id)
+        .filter(UserProject.id == project_id)
         .one_or_none()
     )
-    if project is None:
+    if project is None or not check_project_ownership(project_id, user_id, db_session):
         raise HTTPException(status_code=404, detail="Project not found")
 
     user_id = user.id if user is not None else None
@@ -216,10 +246,10 @@ def link_user_file_to_project(
     user_id = user.id if user is not None else None
     project = (
         db_session.query(UserProject)
-        .filter(UserProject.id == project_id, UserProject.user_id == user_id)
+        .filter(UserProject.id == project_id)
         .one_or_none()
     )
-    if project is None:
+    if project is None or not check_project_ownership(project_id, user_id, db_session):
         raise HTTPException(status_code=404, detail="Project not found")
 
     user_file = (
@@ -262,11 +292,11 @@ def get_project_instructions(
     user_id = user.id if user is not None else None
     project = (
         db_session.query(UserProject)
-        .filter(UserProject.id == project_id, UserProject.user_id == user_id)
+        .filter(UserProject.id == project_id)
         .one_or_none()
     )
 
-    if project is None:
+    if project is None or not check_project_ownership(project_id, user_id, db_session):
         raise HTTPException(status_code=404, detail="Project not found")
 
     return ProjectInstructionsResponse(instructions=project.instructions)
@@ -606,10 +636,10 @@ def get_project_total_token_count(
     user_id = user.id if user is not None else None
     project = (
         db_session.query(UserProject)
-        .filter(UserProject.id == project_id, UserProject.user_id == user_id)
+        .filter(UserProject.id == project_id)
         .one_or_none()
     )
-    if project is None:
+    if project is None or not check_project_ownership(project_id, user_id, db_session):
         raise HTTPException(status_code=404, detail="Project not found")
 
     total_tokens = get_project_token_count(
