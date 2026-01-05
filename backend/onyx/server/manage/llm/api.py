@@ -341,11 +341,11 @@ def set_provider_as_default(
     db_session: Session = Depends(get_session),
 ) -> None:
     # SAFETY CHECK: Prevent Shadow Admins (BYOK users) from changing global default
-#     # if user and user.email and user.email.startswith("api_key__"):
-#     #      raise HTTPException(
-#     #         status_code=403,
-#     #         detail="Project Owners cannot change the Global Default Provider. Please contact system admin."
-#     #     )
+    if user and user.email and user.email.startswith("api_key__"):
+         raise HTTPException(
+            status_code=403,
+            detail="Project Owners cannot change the Global Default Provider. Please contact system admin."
+        )
 
     update_default_provider(provider_id=provider_id, db_session=db_session)
 

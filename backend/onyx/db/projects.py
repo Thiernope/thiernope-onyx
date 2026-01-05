@@ -245,6 +245,7 @@ def get_project_token_count(
         db_session.query(func.coalesce(func.sum(UserFile.token_count), 0))
         .filter(
             UserFile.projects.any(id=project_id),
+            UserFile.user_id == user_id
         )
         .scalar()
         or 0

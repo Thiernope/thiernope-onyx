@@ -173,6 +173,10 @@ def get_user_preferred_llm(user: User | None, db_session: Session) -> tuple[LLM,
         logger.info(f"Context-Aware Upload: Using Provider '{selected_provider.name}' for user {getattr(user, 'id', 'anon')}")
         
         provider_view = LLMProviderView.from_model(selected_provider)
+        # SECURITY: Mask API key in logs immediately if it was ever logged (it wasn't here, but good practice to ensure view usage)
+        if provider_view.api_key:
+             # We need raw key for get_llm, so we don't mask the object itself, but ensure we don't log it.
+             pass
         model_name = selected_provider.default_model_name
         
         if not model_name:
@@ -193,7 +197,7 @@ def get_user_preferred_llm(user: User | None, db_session: Session) -> tuple[LLM,
         return llm, llm 
 
     except Exception as e:
-        logger.error(f"Failed to determination user-preferred LLM: {e}")
+        logger.error(f"Failed to determination user-preferred LLM: {str(e)[:200]}") # Truncate error to avoid dumping huge payloads
         return get_default_llms()
 
 

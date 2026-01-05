@@ -56,20 +56,27 @@ def get_projects(
 ) -> list[UserProjectSnapshot]:
     user_id = user.id if user is not None else None
     
-    from sqlalchemy import or_
     project_ids_from_groups: list[int] = []
     if user:
-        project_ids_from_groups = [
-            int(row[0].split("-")[1])
-            for row in db_session.query(UserGroup.name)
+        # Use regex or safer split to extract ID from "Project-<id>"
+        # Expected format: "Project-123"
+        raw_rows = (
+            db_session.query(UserGroup.name)
             .join(User__UserGroup, UserGroup.id == User__UserGroup.user_group_id)
             .filter(
                 User__UserGroup.user_id == user_id,
                 UserGroup.name.like("Project-%")
             )
             .all()
-            if row[0].split("-")[1].isdigit()
-        ]
+        )
+        
+        for row in raw_rows:
+            # row is a tuple, e.g. ('Project-123',)
+            name = row[0]
+            if name.startswith("Project-") and "-" in name:
+                parts = name.split("-", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    project_ids_from_groups.append(int(parts[1]))
 
     projects = (
         db_session.query(UserProject)
