@@ -10,6 +10,7 @@ from fastapi import Response
 from fastapi import UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from onyx.auth.users import current_user
 from onyx.background.celery.versioned_apps.client import app as client_app
