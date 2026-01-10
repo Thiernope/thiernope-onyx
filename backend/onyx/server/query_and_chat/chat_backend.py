@@ -359,11 +359,21 @@ def rename_chat_session(
         chat_session_id=chat_session_id, db_session=db_session
     )
 
+    # Fetch chat session to get project context
+    chat_session = get_chat_session_by_id(
+        chat_session_id=chat_session_id, 
+        user_id=user_id, 
+        db_session=db_session
+    )
+
     try:
+        # Pass user and project_id to ensure correct BYOK provider is used
         llm, _ = get_default_llms(
             additional_headers=extract_headers(
                 request.headers, LITELLM_PASS_THROUGH_HEADERS
-            )
+            ),
+            user=user,
+            project_id=chat_session.project_id
         )
     except GenAIDisabledException:
         # This may be longer than what the LLM tends to produce but is the most
@@ -675,6 +685,7 @@ def get_available_context_tokens_for_session(
 class ChatSeedRequest(BaseModel):
     # standard chat session stuff
     persona_id: int
+    project_id: int | None = None
 
     # overrides / seeding
     llm_override: LLMOverride | None = None
@@ -707,6 +718,7 @@ def seed_chat(
             description=chat_seed_request.description or "",
             user_id=None,  # this chat session is "unassigned" until a user visits the web UI
             persona_id=chat_seed_request.persona_id,
+            project_id=chat_seed_request.project_id,
             llm_override=chat_seed_request.llm_override,
             prompt_override=chat_seed_request.prompt_override,
         )

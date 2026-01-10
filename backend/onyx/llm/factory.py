@@ -7,6 +7,7 @@ from onyx.configs.app_configs import DISABLE_GENERATIVE_AI
 from onyx.configs.model_configs import GEN_AI_TEMPERATURE
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.llm import can_user_access_llm_provider
+from onyx.db.llm import fetch_best_provider_for_user
 from onyx.db.llm import fetch_default_provider
 from onyx.db.llm import fetch_default_vision_provider
 from onyx.db.llm import fetch_existing_llm_provider
@@ -115,18 +116,31 @@ def get_llms_for_persona(
     llm_override: LLMOverride | None = None,
     additional_headers: dict[str, str] | None = None,
     long_term_logger: LongTermLogger | None = None,
+    project_id: int | None = None,
 ) -> tuple[LLM, LLM]:
+    logger.info(f"[PERSONA] get_llms_for_persona called: persona={persona.id if persona and hasattr(persona, 'id') else None}, user={user.id if user else None}, project_id={project_id}")
+    
     if persona is None:
-        logger.warning("No persona provided, using default LLMs")
-        return get_default_llms()
+        logger.info("[PERSONA] No persona provided, calling get_default_llms")
+        return get_default_llms(
+            user=user,
+            project_id=project_id,
+            additional_headers=additional_headers,
+            long_term_logger=long_term_logger,
+        )
 
     provider_name_override = llm_override.model_provider if llm_override else None
     model_version_override = llm_override.model_version if llm_override else None
     temperature_override = llm_override.temperature if llm_override else None
 
     provider_name = provider_name_override or persona.llm_model_provider_override
+    logger.info(f"[PERSONA] provider_name={provider_name}, llm_override={llm_override is not None}")
+    
     if not provider_name:
+        logger.info(f"[PERSONA] No provider override, calling get_default_llms with project_id={project_id}")
         return get_default_llms(
+            user=user,
+            project_id=project_id,
             temperature=temperature_override or GEN_AI_TEMPERATURE,
             additional_headers=additional_headers,
             long_term_logger=long_term_logger,
@@ -159,6 +173,8 @@ def get_llms_for_persona(
                 temperature=temperature_override or GEN_AI_TEMPERATURE,
                 additional_headers=additional_headers,
                 long_term_logger=long_term_logger,
+                user=user,
+                project_id=project_id,
             )
 
         llm_provider = LLMProviderView.from_model(provider_model)
@@ -320,12 +336,20 @@ def get_default_llms(
     temperature: float | None = None,
     additional_headers: dict[str, str] | None = None,
     long_term_logger: LongTermLogger | None = None,
+    user: User | None = None,
+    project_id: int | None = None,
 ) -> tuple[LLM, LLM]:
+    logger.info(f"[DEFAULT_LLMS] Called with user={user.id if user else None}, project_id={project_id}")
+    
     if DISABLE_GENERATIVE_AI:
         raise GenAIDisabledException()
 
     with get_session_with_current_tenant() as db_session:
-        llm_provider = fetch_default_provider(db_session)
+        logger.info(f"[DEFAULT_LLMS] Calling fetch_best_provider_for_user...")
+        llm_provider = fetch_best_provider_for_user(
+            db_session=db_session, user=user, project_id=project_id
+        )
+        logger.info(f"[DEFAULT_LLMS] Got provider: {llm_provider.name if llm_provider else None} (ID: {llm_provider.id if llm_provider else None})")
 
     if not llm_provider:
         raise ValueError("No default LLM provider found")
@@ -368,6 +392,9 @@ def get_llm(
 ) -> LLM:
     if temperature is None:
         temperature = GEN_AI_TEMPERATURE
+
+    key_suffix = api_key[-4:] if api_key and len(api_key) > 4 else "NONE"
+    logger.info(f"[LLM_VERIFY] Initializing LLM: Provider={provider}, Model={model}, KeySuffix={key_suffix}")
 
     extra_headers = build_llm_extra_headers(additional_headers)
 

@@ -282,6 +282,7 @@ def stream_chat_message_objects(
     # Slack context for federated Slack search
     slack_context: SlackContext | None = None,
 ) -> AnswerStream:
+    logger.info(f"[CHAT_ENTRY] stream_chat_message_objects called for user {user.id if user else None}")
     tenant_id = get_current_tenant_id()
     use_existing_user_message = new_msg_req.use_existing_user_message
 
@@ -323,12 +324,15 @@ def stream_chat_message_objects(
                 "Must specify a set of documents for chat or specify search options"
             )
 
+        logger.info(f"[CHAT] About to get LLMs - chat_session.project_id={chat_session.project_id}, user={user.id if user else None}")
+        
         llm, fast_llm = get_llms_for_persona(
             persona=persona,
             user=user,
             llm_override=new_msg_req.llm_override or chat_session.llm_override,
             additional_headers=litellm_additional_headers,
             long_term_logger=long_term_logger,
+            project_id=chat_session.project_id,
         )
         token_counter = get_llm_token_counter(llm)
 

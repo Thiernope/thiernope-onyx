@@ -22,6 +22,10 @@ from onyx.server.manage.llm.models import LLMProviderUpsertRequest
 from onyx.server.manage.llm.models import LLMProviderView
 from shared_configs.enums import EmbeddingProvider
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def update_group_llm_provider_relationships__no_commit(
     llm_provider_id: int,
@@ -432,6 +436,85 @@ def fetch_default_vision_provider(db_session: Session) -> LLMProviderView | None
     if not provider_model:
         return None
     return LLMProviderView.from_model(provider_model)
+
+
+def fetch_best_provider_for_user(
+    db_session: Session,
+    user: User | None,
+    project_id: int | None = None,
+) -> LLMProviderView | None:
+    """
+    User-aware provider selection logic with STRICT project-first priority:
+    
+    1. If project_id provided:
+       - Look for Project-{id} custom provider (BYOK/GYOK)
+       - If NOT found → Standard project → return global default (Standard-Tier-Provider)
+       - This ensures invitees ALWAYS use project owner's credits
+    
+    2. If NO project (personal chat):
+       - Look for user's Personal-{tenant_id} private provider
+       - Fallback to global default
+    
+    CRITICAL: Project context ALWAYS overrides personal preferences to ensure
+    credits are charged to project owner, never to invitees.
+    """
+    logger.info(f"[ROUTING] fetch_best_provider_for_user called: user={user.id if user else None}, project_id={project_id}")
+    
+    if not user:
+        result = fetch_default_provider(db_session)
+        logger.info(f"[ROUTING] No user provided, returning global default: {result.name if result else None}")
+        return result
+
+    user_group_ids = fetch_user_group_ids(db_session, user)
+    all_providers = fetch_existing_llm_providers(db_session)
+    
+    logger.info(f"[ROUTING] User {user.id} is in {len(user_group_ids)} groups")
+
+    # 1. PROJECT CONTEXT - Absolute Priority
+    if project_id:
+        logger.info(f"[ROUTING] Project context detected: {project_id}")
+        target_group_name = f"Project-{project_id}"
+        for p in all_providers:
+            if not p.is_public:
+                p_group_names = {g.name for g in p.groups}
+                if target_group_name in p_group_names:
+                    # Found project-specific BYOK/GYOK provider
+                    logger.info(f"[ROUTING] ✅ Found project provider: {p.name} (ID: {p.id})")
+                    return LLMProviderView.from_model(p)
+        
+        # No custom project provider → Standard project
+        # Return global default immediately (skip personal provider check)
+        # This ensures BYOK invitees don't use their personal credits
+        result = fetch_default_provider(db_session)
+        logger.info(f"[ROUTING] No project provider found, returning Standard: {result.name if result else None}")
+        return result
+
+    # 2. PERSONAL CONTEXT (No project) - Look for Personal provider
+    logger.info(f"[ROUTING] Personal context (no project)")
+    # First pass: look specifically for Personal-{tenant_id} providers
+    for p in all_providers:
+        if not p.is_public:
+            p_group_names = {g.name for g in p.groups}
+            if any(name.startswith("Personal-") for name in p_group_names):
+                provider_group_ids = {g.id for g in p.groups}
+                if user_group_ids & provider_group_ids:
+                    logger.info(f"[ROUTING] ✅ Found personal provider: {p.name} (ID: {p.id})")
+                    return LLMProviderView.from_model(p)
+
+    # Second pass: fallback to ANY other private provider the user has access to
+    # This ensures that if a user is part of a project (and thus has access to its BYOK provider),
+    # they default to that provider instead of the global Standard tier, even in "Personal" context.
+    for p in all_providers:
+        if not p.is_public:
+            p_group_ids = {g.id for g in p.groups}
+            if user_group_ids & p_group_ids:
+                logger.info(f"[ROUTING] ✅ Found accessible restricted provider: {p.name} (ID: {p.id}) - Preferring over global default")
+                return LLMProviderView.from_model(p)
+
+    # 3. Final Fallback - Global Default (Standard-Tier-Provider)
+    result = fetch_default_provider(db_session)
+    logger.info(f"[ROUTING] ❌ No user-specific provider, returning global default: {result.name if result else None}")
+    return result
 
 
 def fetch_llm_provider_view(

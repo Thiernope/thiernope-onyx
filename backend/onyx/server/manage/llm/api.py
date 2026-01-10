@@ -213,6 +213,33 @@ def list_llm_providers(
         ):
             continue
 
+        # STRICT ISOLATION: Additional filtering for admin UI visibility
+        # Shadow admins (BYOK) should NEVER see Standard-Tier-Provider
+        # Standard admins should NEVER see other users' Personal/Project providers
+        provider_name = llm_provider_model.name
+        
+        if is_shadow_admin:
+            # BYOK shadow admin → Hide Standard-Tier-Provider
+            if provider_name == "Standard-Tier-Provider":
+                continue
+            # Only show providers they have group access to (Personal/Project)
+            if llm_provider_model.groups:
+                provider_group_ids = {g.id for g in llm_provider_model.groups}
+                if not (user_group_ids & provider_group_ids):
+                    continue
+        else:
+            # Standard admin → Hide Personal/Project providers from other users
+            # Show only Standard-Tier-Provider + their own project providers
+            if provider_name.startswith("Personal-"):
+                # Hide all Personal providers for Standard admins
+                continue
+            if provider_name.startswith("Project-"):
+                # Show only projects they're members of
+                if llm_provider_model.groups:
+                    provider_group_ids = {g.id for g in llm_provider_model.groups}
+                    if not (user_group_ids & provider_group_ids):
+                        continue
+
         from_model_start = datetime.now(timezone.utc)
         full_llm_provider = LLMProviderView.from_model(llm_provider_model)
         from_model_end = datetime.now(timezone.utc)
@@ -223,6 +250,17 @@ def list_llm_providers(
 
         _mask_provider_api_key(full_llm_provider)
         llm_provider_list.append(full_llm_provider)
+
+    # DYNAMIC DEFAULTING: Set [DEFAULT] badge based on user's best provider
+    # This ensures the badge reflects the actual routing logic, not just database state
+    from onyx.db.llm import fetch_best_provider_for_user
+    best_provider = fetch_best_provider_for_user(db_session, user)
+    best_id = best_provider.id if best_provider else None
+    
+    if best_id:
+        for provider in llm_provider_list:
+            # Override is_default_provider to match routing logic
+            provider.is_default_provider = (provider.id == best_id)
 
     end_time = datetime.now(timezone.utc)
     duration = (end_time - start_time).total_seconds()
@@ -340,12 +378,6 @@ def set_provider_as_default(
     user: User | None = Depends(current_admin_user),
     db_session: Session = Depends(get_session),
 ) -> None:
-    # SAFETY CHECK: Prevent Shadow Admins (BYOK users) from changing global default
-    if user and user.email and user.email.startswith("api_key__"):
-         raise HTTPException(
-            status_code=403,
-            detail="Project Owners cannot change the Global Default Provider. Please contact system admin."
-        )
 
     update_default_provider(provider_id=provider_id, db_session=db_session)
 
@@ -430,26 +462,38 @@ def list_llm_provider_basics(
     all_providers = fetch_existing_llm_providers(db_session)
     user_group_ids = fetch_user_group_ids(db_session, user) if user else set()
     is_admin = user and user.role == UserRole.ADMIN
+    
+    # Identify the best provider for THIS user/context to show the [DEFAULT] badge correctly
+    from onyx.db.llm import fetch_best_provider_for_user
+    best_provider = fetch_best_provider_for_user(db_session, user)
+    best_id = best_provider.id if best_provider else None
 
     accessible_providers = []
 
     for provider in all_providers:
         # Include all public providers
         if provider.is_public:
-            accessible_providers.append(LLMProviderDescriptor.from_model(provider))
+            desc = LLMProviderDescriptor.from_model(provider)
+            if best_id:
+                desc.is_default_provider = (provider.id == best_id)
+            accessible_providers.append(desc)
             continue
 
         # Include restricted providers user has access to via groups
+        can_access = False
         if is_admin:
-            # Admins see all providers
-            accessible_providers.append(LLMProviderDescriptor.from_model(provider))
+            can_access = True
         elif provider.groups:
-            # User must be in at least one of the provider's groups
             if user_group_ids.intersection({g.id for g in provider.groups}):
-                accessible_providers.append(LLMProviderDescriptor.from_model(provider))
+                can_access = True
         elif not provider.personas:
-            # No restrictions = accessible
-            accessible_providers.append(LLMProviderDescriptor.from_model(provider))
+            can_access = True
+
+        if can_access:
+            desc = LLMProviderDescriptor.from_model(provider)
+            if best_id:
+                desc.is_default_provider = (provider.id == best_id)
+            accessible_providers.append(desc)
 
     end_time = datetime.now(timezone.utc)
     duration = (end_time - start_time).total_seconds()

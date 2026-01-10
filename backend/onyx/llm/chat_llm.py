@@ -480,14 +480,16 @@ class LitellmLLM(LLM):
             self.config.model_name, self.config.model_provider
         )
 
-        # Needed to get reasoning tokens from the model
-        if not is_legacy_langchain and (
-            is_true_openai_model(self.config.model_provider, self.config.model_name)
-            or self.config.model_provider == AZURE_PROVIDER_NAME
-        ):
-            model_provider = f"{self.config.model_provider}/responses"
-        else:
-            model_provider = self.config.model_provider
+        # DISABLED: /responses mode causes litellm to pass unsupported 'usage' parameter to OpenAI SDK
+        # This sacrifices reasoning token tracking but fixes the completion crash
+        # if not is_legacy_langchain and (
+        #     is_true_openai_model(self.config.model_provider, self.config.model_name)
+        #     or self.config.model_provider == AZURE_PROVIDER_NAME
+        # ):
+        #     model_provider = f"{self.config.model_provider}/responses"
+        # else:
+        #     model_provider = self.config.model_provider
+        model_provider = self.config.model_provider
 
         try:
             return litellm.completion(
@@ -508,9 +510,11 @@ class LitellmLLM(LLM):
                 # streaming choice
                 stream=stream,
                 # model params
+                # Only include usage for OpenRouter keys (Managed) to ensure credits tracking
+                # Disable for others (BYOK OpenAI) to avoid 'usage' arg crash
+                # **({"stream_options": {"include_usage": True}} if stream and self._api_key and str(self._api_key).startswith("sk-or-") else {}),
                 temperature=(1 if is_reasoning else self._temperature),
                 timeout=timeout_override or self._timeout,
-                **({"stream_options": {"include_usage": True}} if stream else {}),
                 # For now, we don't support parallel tool calls
                 # NOTE: we can't pass this in if tools are not specified
                 # or else OpenAI throws an error
